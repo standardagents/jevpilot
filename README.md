@@ -47,6 +47,19 @@ Open [localhost:5173](http://localhost:5173). **Local development skips all logi
 
 This also applies to `npm run preview` after `npm run build`. Restart the local server after changing `.env`.
 
+### Optional: GPT-6 Luna Decisions via EvoLink
+
+To use OpenAI GPT-6 Luna Decisions through [EvoLink](https://evolink.ai/gpt-6-luna-decisions), set these server-side values in `.env` and restart the server:
+
+```dotenv
+DECISION_PROVIDER=evolink
+EVOLINK_API_KEY=your_key_here
+```
+
+Jev remains the default when `DECISION_PROVIDER` is unset or `jev`. The EvoLink adapter posts to `https://direct.evolink.ai/v1/decisions` with model `gpt-6-luna-decisions`, sends the compact scene as text `input` with named choice questions, and maps returned probability arrays back to the current candidate batch. Single eligible choices still resolve locally without a paid call. The autopilot label and JSON inspector show the selected provider.
+
+Cost estimates default to $0.10 per million billable input tokens with a $0.000147059 request minimum (0.01 Credits at 68 Credits/USD); output and cache detail fields incur no additional charge. Set `EVOLINK_INPUT_PRICE` and `EVOLINK_MIN_REQUEST_COST` if the account's rates differ. Inputs above 272,000 tokens use the published 2x input rate. See the [EvoLink Decisions reference](https://evolink.ai/docs/en/api-manual/language-series/gpt/decisions/decisions-reference). Hosted demo credits use the same provider-specific calculation for reservations and settlement.
+
 **J** toggles autopilot · **WASD** to drive · **Space** to brake.
 
 Asset credits and licenses are included in [public/](public/).

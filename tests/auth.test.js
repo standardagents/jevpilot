@@ -86,6 +86,8 @@ test("local status explicitly disables auth and has no demo credit account", asy
   assert.equal(data.auth_required, false);
   assert.equal(data.authenticated, false);
   assert.equal(data.configured, true);
+  assert.equal(data.decision_provider, "jev");
+  assert.equal(data.model, "jev-latest");
   assert.equal(data.credits, undefined);
   assert.equal(data.user, undefined);
   assert(!JSON.stringify(data).includes("local-test-key"));
@@ -94,6 +96,62 @@ test("local status explicitly disables auth and has no demo credit account", asy
     assert.equal(login.status, 302);
     assert.equal(login.headers.get("Location"), "/");
   }
+});
+
+test("EvoLink is an explicit opt-in and cannot reuse the Jev key", async (t) => {
+  const origin = await localServer(t, {
+    DECISION_PROVIDER: "evolink",
+    TYPESAFE_API_KEY: "jev-only-key",
+  });
+  const status = await (await fetch(`${origin}/api/status`)).json();
+  assert.equal(status.decision_provider, "evolink");
+  assert.equal(status.decision_name, "Luna");
+  assert.equal(status.model, "gpt-6-luna-decisions");
+  assert.equal(status.configured, false);
+  assert.equal(status.pricing.input_per_million, 0.1);
+  assert.equal(status.pricing.output_per_million, 0);
+  assert(!JSON.stringify(status).includes("jev-only-key"));
+  const response = await fetch(`${origin}/api/decide`, {
+    method: "POST",
+    body: "{}",
+  });
+  assert.equal(response.status, 503);
+  assert.match((await response.json()).error, /EVOLINK_API_KEY/);
+
+  const defaultOrigin = await localServer(t, {
+    EVOLINK_API_KEY: "evolink-only-key",
+  });
+  const defaultStatus = await (
+    await fetch(`${defaultOrigin}/api/status`)
+  ).json();
+  assert.equal(defaultStatus.decision_provider, "jev");
+  assert.equal(defaultStatus.configured, false);
+});
+
+test("local EvoLink status and rejected-key errors never reveal credentials", async (t) => {
+  const origin = await localServer(t, {
+    DECISION_PROVIDER: "evolink",
+    EVOLINK_API_KEY: "evolink-test-key",
+  });
+  const status = await (await fetch(`${origin}/api/status`)).json();
+  assert.equal(status.configured, true);
+  assert(!JSON.stringify(status).includes("evolink-test-key"));
+  const clientFetch = globalThis.fetch;
+  t.mock.method(globalThis, "fetch", async (url, options) => {
+    if (url !== "https://direct.evolink.ai/v1/decisions")
+      return clientFetch(url, options);
+    assert.equal(options.headers.Authorization, "Bearer evolink-test-key");
+    return new Response("", { status: 401 });
+  });
+  const response = await clientFetch(`${origin}/api/decide`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: origin },
+    body: JSON.stringify({ state: new Simulation(42).decisionState() }),
+  });
+  assert.equal(response.status, 401);
+  const body = await response.json();
+  assert.match(body.error, /EvoLink rejected the API key/);
+  assert(!JSON.stringify(body).includes("evolink-test-key"));
 });
 
 test("local decisions need a personal Jev key, not login credentials", async (t) => {
