@@ -38,7 +38,8 @@ import {
   loadingFailed,
   nextPaint,
 } from "./loading-screen.js";
-import { prepareJevRequest, decisionInterval } from "./jev-request.js";
+import { decisionInterval } from "./jev-request.js";
+import { prepareDecisionRequest } from "./decision-request.js";
 import { THEMES } from "./world.js";
 import { candidateName, decisionControls } from "./planning.js";
 import { clamp, nearestOnPath } from "./math.js";
@@ -83,6 +84,8 @@ let playCredits = null,
   lastMapDraw = 0;
 showLoading("Loading car and scenery…");
 let configured = false,
+  decisionProvider = "jev",
+  decisionName = "Jev",
   authRequired = true,
   busy = false,
   generation = 0,
@@ -257,8 +260,14 @@ function refreshWorld() {
 function syncPilot() {
   const on = sim.autopilot;
   $("autopilot").setAttribute("aria-checked", String(on));
-  $("pilot-label").textContent = on ? "Jev engaged" : "Engage Jev";
-  tooltips.set($("autopilot"), `${on ? "Disengage" : "Engage"} Jev · J`);
+  $("pilot-label").textContent = on
+    ? `${decisionName} engaged`
+    : `Engage ${decisionName}`;
+  tooltips.set(
+    $("autopilot"),
+    `${on ? "Disengage" : "Engage"} ${decisionName} · J`,
+  );
+  $("autopilot").setAttribute("aria-label", `${decisionName} autopilot`);
   $("autopilot").disabled = !!sim.crash;
   document.body.classList.toggle("piloting", on);
   touch.sync();
@@ -491,14 +500,12 @@ document.querySelectorAll("[data-tab]").forEach(
         .querySelectorAll("[data-tab]")
         .forEach((b) => b.classList.toggle("active", b === button));
       $("json-description").textContent = {
-        request:
-          "Exact Jev API payload, including instructions and offered choices. Full geometry and control details stay local.",
+        request: `Exact ${decisionName} API payload, including instructions and offered choices. Full geometry and control details stay local.`,
         sensor:
           "Complete forward perception, route guidance, geometry predictions and vehicle telemetry.",
         world:
           "All roads, buildings, vehicles, pedestrians, controls, and the current route.",
-        decision:
-          "Actual Jev probabilities and token usage. Costs accumulate across every completed call.",
+        decision: `Actual ${decisionName} probabilities and token usage. Costs accumulate across every completed call.`,
       }[inspectorTab];
       renderJSON();
     }),
@@ -512,11 +519,14 @@ $("freeze-json").onclick = () => {
   syncFreeze();
 };
 function inspectRequest(state) {
-  const { request, fixed } = prepareJevRequest(state);
-  return Object.keys(request.questions).length
+  const { request, fixed, questions } = prepareDecisionRequest(
+    state,
+    decisionProvider,
+  );
+  return Object.keys(questions).length
     ? request
     : {
-        status: "No Jev call needed: only one eligible action.",
+        status: `No ${decisionName} call needed: only one eligible action.`,
         resolved_locally: fixed,
       };
 }
@@ -547,7 +557,7 @@ function updateCostTooltip(pricing) {
     : "";
   tooltips.set(
     document.querySelector(".cost-total"),
-    `${playCredits ? "Remaining from your one-time $0.25 allowance. " : ""}${averages}Estimated from Jev-reported tokens at $${pricing.input_per_million}/M input and $${pricing.output_per_million}/M output.`,
+    `${playCredits ? "Remaining from your one-time $0.25 allowance. " : ""}${averages}Estimated from ${decisionName}-reported tokens at $${pricing.input_per_million}/M input and $${pricing.output_per_million}/M output.${pricing.minimum_per_request ? ` Minimum $${pricing.minimum_per_request.toFixed(6)}/request.` : ""}`,
   );
 }
 function inspectData() {
@@ -1037,9 +1047,19 @@ fetch("/api/status", { credentials: "same-origin" })
     $("sign-out").hidden = !data.authenticated;
     if (data.user) tooltips.set($("sign-out"), `Sign out · ${data.user.email}`);
     configured = data.configured;
+    decisionProvider = data.decision_provider ?? "jev";
+    decisionName = data.decision_name ?? "Jev";
+    document.querySelector('[data-tab="request"]').textContent =
+      `${decisionName} input`;
+    syncPilot();
+    $("json-description").textContent =
+      `Exact ${decisionName} API payload, including instructions and offered choices. Full geometry and control details stay local.`;
     updateCostTooltip(data.pricing);
     if (!configured)
-      toast("Jev API key is missing. Check the server configuration.", "error");
+      toast(
+        `${decisionName} API key is missing. Check the server configuration.`,
+        "error",
+      );
   })
   .catch(() => {
     toast("Jev server unavailable.", "error");

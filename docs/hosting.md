@@ -22,6 +22,8 @@ Set three Cloudflare Worker secrets with `npx wrangler secret put NAME`:
 
 These are encrypted **runtime Worker secrets**, already configured in production and preserved by subsequent builds. The frontend build does not need them. No secret belongs in a `VITE_` variable or build-time variable. `.env` and `.dev.vars` are gitignored. `npm run dev` retains the local, unmetered development proxy.
 
+To opt into GPT-6 Luna Decisions via EvoLink, set `DECISION_PROVIDER` to `evolink` in the Worker's runtime variables and add the `EVOLINK_API_KEY` secret. Optional `EVOLINK_INPUT_PRICE` and `EVOLINK_MIN_REQUEST_COST` overrides follow `.env.example`. `TYPESAFE_API_KEY` remains the key for the default Jev provider; a provider never uses the other provider's key. Both providers require the same sign-in and credit checks.
+
 ## Sign-in
 
 The Worker redirects unauthenticated page requests to `/login` and rejects unauthenticated API requests. `/api/auth/start` creates a Standard Agents delegated sign-in request for the JevPilot identity-only project. The project owns the customer-facing name, description, and logo. A signed, browser-bound, ten-minute OAuth state carries the unchecked early-access preference. The one-time callback code is exchanged server-to-server, then a Secure, HttpOnly, SameSite cookie stores the verified Platform user ID for 30 days. JevPilot does not grant Platform dashboard access or project membership.

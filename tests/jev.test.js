@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluate, questions, validState } from "../server/jev.js";
+import { prepareJevRequest } from "../src/jev-request.js";
 import { Simulation } from "../src/simulation.js";
 import {
   candidateChoices,
   vectorWeights,
   decisionControls,
+  decisionSelection,
   physics,
   maneuverSteering,
 } from "../src/planning.js";
@@ -14,6 +16,7 @@ function response(state, choice = Object.keys(candidateChoices(state))[0]) {
   return {
     model: "jev-latest",
     answers: {
+      motion: { choice: "drive", probabilities: { drive: 1 } },
       vector: {
         choice,
         confidence: 0.8,
@@ -31,13 +34,40 @@ function response(state, choice = Object.keys(candidateChoices(state))[0]) {
   };
 }
 
+function upstreamResponse(state, choice) {
+  return {
+    model: "jev-latest",
+    answers: Object.fromEntries(
+      Object.entries(prepareJevRequest(state).request.questions).map(
+        ([name, question]) => {
+          const ids = Object.keys(question.criteria);
+          return [
+            name,
+            {
+              type: "choice",
+              choice: choice ?? ids[0],
+              probabilities: Object.fromEntries(
+                ids.map((id, i) => [
+                  id,
+                  i === 0 ? 0.8 : 0.2 / (ids.length - 1),
+                ]),
+              ),
+            },
+          ];
+        },
+      ),
+    ),
+    usage: { input_tokens: 2000, output_tokens: 80 },
+  };
+}
+
 test("Jev chooses a complete maneuver from the submitted random batch", async () => {
   const sample = new Simulation(42).decisionState();
   const original = globalThis.fetch;
   let request;
   globalThis.fetch = async (url, options) => {
     request = { url, ...options };
-    return Response.json(response(sample));
+    return Response.json(upstreamResponse(sample));
   };
   try {
     const result = await evaluate(sample, {
@@ -47,7 +77,9 @@ test("Jev chooses a complete maneuver from the submitted random batch", async ()
     const sent = JSON.parse(request.body);
     assert.deepEqual(Object.keys(sent.questions), ["vector"]);
     assert.deepEqual(
-      Object.keys(sent.questions.vector.criteria),
+      Object.keys(sent.questions.vector.criteria).map(
+        (id) => prepareJevRequest(sample).aliases[id],
+      ),
       Object.keys(candidateChoices(sample)),
     );
     const selected = sample.vectors[result.answers.vector.choice];
@@ -71,18 +103,20 @@ test("unknown choices, invalid probabilities and API errors cannot produce contr
     globalThis.fetch = async () => new Response("", { status: 429 });
     await assert.rejects(() => evaluate(sample, {}), /rate limit/);
     globalThis.fetch = async () =>
-      Response.json(response(sample, "old_batch_v0"));
+      Response.json(upstreamResponse(sample, "old_batch_v0"));
     await assert.rejects(() => evaluate(sample, {}), /incomplete decision/);
-    const bad = response(sample);
+    const bad = upstreamResponse(sample);
     delete bad.answers.vector.probabilities[
-      Object.keys(candidateChoices(sample))[1]
+      Object.keys(bad.answers.vector.probabilities)[1]
     ];
     globalThis.fetch = async () => Response.json(bad);
     await assert.rejects(() => evaluate(sample, {}), /incomplete decision/);
     const hit = structuredClone(sample);
     const excluded = Object.keys(candidateChoices(hit))[0];
     hit.vectors[excluded].collision_predicted = true;
-    globalThis.fetch = async () => Response.json(response(hit, excluded));
+    hit.vectors[excluded].collision_imminent = true;
+    globalThis.fetch = async () =>
+      Response.json(upstreamResponse(hit, excluded));
     await assert.rejects(
       () => evaluate(hit, {}),
       /incomplete decision|predicted collision/,
@@ -102,6 +136,7 @@ test("control validation rejects another batch and changed steering or speed", (
     steering: selected.steering,
     velocity: selected.velocity_mps,
   };
+  result.selection = decisionSelection(first, result.answers);
   assert(decisionControls(first, result));
   assert.equal(decisionControls(sim.decisionState(), result), null);
   assert.equal(
@@ -140,7 +175,12 @@ test("every displayed path exactly integrates its submitted steering and speed",
       const ghost = { ...sim.player };
       const projection = sim.lastPlan.projections[id];
       for (let i = 1; i <= 60; i++) {
-        physics(ghost, maneuverSteering(ghost, candidate), candidate.velocity_mps, 0.05);
+        physics(
+          ghost,
+          maneuverSteering(ghost, candidate),
+          candidate.velocity_mps,
+          0.05,
+        );
         assert(Math.abs(ghost.x - projection.points[i].x) < 1e-9);
         assert(Math.abs(ghost.z - projection.points[i].z) < 1e-9);
       }
@@ -174,7 +214,14 @@ test("eligible choices exclude collisions and fall back to braking when blocked"
       (v) => v.velocity_mps > 0 && v.stays_on_road && !v.collision_predicted,
     ),
   );
-  for (const v of Object.values(state.vectors)) v.collision_predicted = true;
+  state.vectors[`${state.batch_id}_stop`] = {
+    ...Object.values(state.vectors)[0],
+    velocity_mps: 0,
+  };
+  for (const v of Object.values(state.vectors)) {
+    v.collision_predicted = true;
+    v.collision_imminent = true;
+  }
   assert.deepEqual(Object.keys(candidateChoices(state)), [
     `${state.batch_id}_stop`,
   ]);

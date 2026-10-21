@@ -1,6 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import { evaluate, validState } from "./jev.js";
-import { prepareJevRequest } from "../src/jev-request.js";
+import { prepareDecisionRequest } from "../src/decision-request.js";
+import { decisionConfig, decisionCost } from "./decision-config.js";
 
 // Integer nanodollars preserve sub-cent token charges without floating-point drift.
 export const GRANT_NANODOLLARS = 250_000_000;
@@ -114,19 +115,23 @@ export class PlayAccount extends DurableObject {
     let prepared, reserve;
     try {
       if (!validState(state)) throw new Error();
-      prepared = prepareJevRequest(state);
+      const config = decisionConfig(this.env);
+      prepared = prepareDecisionRequest(state, config.provider);
       const bytes = new TextEncoder().encode(
         JSON.stringify(prepared.request),
       ).byteLength;
       if (bytes > 24000)
         return json({ error: "Driving observation is too large." }, 413);
-      if (Number(this.env.JEV_OUTPUT_PRICE || 0) !== 0)
+      if (config.pricing.output_per_million !== 0)
         throw new Error("Unbounded output pricing");
       // A conservative byte/token upper bound plus service overhead. Reserve
       // before fetch; refund the difference using actual reported usage.
-      reserve = Object.keys(prepared.request.questions).length
+      reserve = Object.keys(prepared.questions).length
         ? Math.ceil(
-            (bytes + 4096) * Number(this.env.JEV_INPUT_PRICE || 0.042) * 1000,
+            decisionCost(
+              { input_tokens: bytes + 4096, output_tokens: 0 },
+              this.env,
+            ) * 1e9,
           )
         : 0;
       if (!Number.isSafeInteger(reserve) || reserve < 0) throw new Error();
@@ -163,18 +168,16 @@ export class PlayAccount extends DurableObject {
         state,
         this.env,
         AbortSignal.timeout(10000),
-        async (usage) => {
+        async (usage, cost) => {
           if (
             ![usage?.input_tokens, usage?.output_tokens].every(
               (n) => Number.isSafeInteger(n) && n >= 0,
             )
           )
             throw new Error("Jev returned invalid token usage.");
-          actual = Math.ceil(
-            usage.input_tokens *
-              Number(this.env.JEV_INPUT_PRICE || 0.042) *
-              1000,
-          );
+          actual = Math.ceil(cost * 1e9);
+          if (!Number.isSafeInteger(actual) || actual < 0)
+            throw new Error("Invalid decision pricing configuration.");
           // Persist reported usage before validating or returning the chosen path.
           this.account.balance += reserve - actual;
           this.account.spent += actual - reserve;

@@ -4,7 +4,12 @@ import {
   decisionSelection,
   stopAvailability,
 } from "../src/planning.js";
-import { prepareJevRequest, expandJevAnswers } from "../src/jev-request.js";
+import { prepareJevRequest } from "../src/jev-request.js";
+import {
+  prepareDecisionRequest,
+  expandDecisionAnswers,
+} from "../src/decision-request.js";
+import { decisionConfig, decisionCost } from "./decision-config.js";
 
 export function validState(state) {
   if (
@@ -69,16 +74,20 @@ export async function evaluate(state, env, signal, onUsage) {
     throw error;
   }
   const start = performance.now();
-  const prepared = prepareJevRequest(state);
-  const requestQuestions = prepared.request.questions;
+  const config = decisionConfig(env);
+  const prepared = prepareDecisionRequest(state, config.provider);
+  const requestQuestions = prepared.questions;
   const body = JSON.stringify(prepared.request);
   const apiCall = Object.keys(requestQuestions).length > 0;
-  let data = { answers: {}, usage: { input_tokens: 0, output_tokens: 0 } };
+  let data = {
+    answers: config.provider === "evolink" ? [] : {},
+    usage: { input_tokens: 0, output_tokens: 0 },
+  };
   if (apiCall) {
-    const res = await fetch("https://api.typesafe.ai/v1/systemone", {
+    const res = await fetch(config.endpoint, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${env.TYPESAFE_API_KEY}`,
+        Authorization: `Bearer ${env[config.keyEnv]}`,
         "Content-Type": "application/json",
       },
       body,
@@ -87,10 +96,10 @@ export async function evaluate(state, env, signal, onUsage) {
     if (!res.ok) {
       const error = new Error(
         res.status === 401
-          ? "Jev rejected the API key. Update TYPESAFE_API_KEY in .env."
+          ? `${config.service} rejected the API key. Update ${config.keyEnv} in .env.`
           : res.status === 429
-            ? "Jev rate limit reached. Pausing before retry."
-            : `Jev API returned HTTP ${res.status}.`,
+            ? `${config.service} rate limit reached. Pausing before retry.`
+            : `${config.service} API returned HTTP ${res.status}.`,
       );
       error.status = res.status;
       error.billable = res.status >= 500;
@@ -99,33 +108,34 @@ export async function evaluate(state, env, signal, onUsage) {
     data = await res.json();
   }
   // Account for paid responses even when their decision later fails validation.
-  if (onUsage) await onUsage(data.usage);
-  const a = expandJevAnswers(prepared, data.answers);
-  const selection = decisionSelection(state, a);
   if (
-    !selection ||
-    !Number.isFinite(data.usage?.input_tokens) ||
-    !Number.isFinite(data.usage?.output_tokens)
+    ![data.usage?.input_tokens, data.usage?.output_tokens].every(
+      (n) => Number.isSafeInteger(n) && n >= 0,
+    )
   )
-    throw new Error("Jev returned an incomplete decision.");
+    throw new Error(`${config.name} returned an incomplete decision.`);
+  const cost = apiCall ? decisionCost(data.usage, env) : 0;
+  if (onUsage) await onUsage(data.usage, cost);
+  const a = expandDecisionAnswers(prepared, data.answers);
+  const selection = decisionSelection(state, a);
+  if (!selection)
+    throw new Error(`${config.name} returned an incomplete decision.`);
   if (
     requestQuestions.route &&
     !Object.hasOwn(requestQuestions.route.criteria, a.route?.choice)
   )
-    throw new Error("Jev returned an invalid route choice.");
+    throw new Error(`${config.name} returned an invalid route choice.`);
   const selected = state.vectors[selection.choice];
   if (
     (selected.collision_imminent ?? selected.collision_predicted) &&
     selected.velocity_mps !== 0
   )
     throw new Error(
-      "Jev selected a path with an imminent collision. Braking before retry.",
+      `${config.name} selected a path with an imminent collision. Braking before retry.`,
     );
-  const inputPrice = Number(env.JEV_INPUT_PRICE ?? 0.042),
-    outputPrice = Number(env.JEV_OUTPUT_PRICE ?? 0);
   return {
     model: data.model ?? null,
-    decision_source: apiCall ? "jev" : "only_eligible_action",
+    decision_source: apiCall ? config.provider : "only_eligible_action",
     request_bytes: apiCall ? Buffer.byteLength(body) : 0,
     candidate_ids: prepared.aliases,
     resolved_single_choices: Object.keys(prepared.fixed),
@@ -135,20 +145,17 @@ export async function evaluate(state, env, signal, onUsage) {
     controls: { steering: selected.steering, velocity: selected.velocity_mps },
     usage: data.usage,
     latency_ms: Math.round(performance.now() - start),
-    cost_usd:
-      (data.usage.input_tokens * inputPrice +
-        data.usage.output_tokens * outputPrice) /
-      1e6,
+    cost_usd: cost,
     pricing: {
-      input_per_million: inputPrice,
-      output_per_million: outputPrice,
-      source: "https://typesafe.ai/blog/introducing-system-one-models-and-jev",
+      ...config.pricing,
+      source: config.pricingSource,
     },
   };
 }
 export function jevMiddleware(env) {
   // Mounted only by Vite dev/preview. The deployed Worker always requires login.
   let active = 0;
+  const config = decisionConfig(env);
   return async (req, res, next) => {
     const path = new URL(req.url, "http://localhost").pathname;
     if (["/login", "/login.html"].includes(path) && req.method === "GET") {
@@ -167,18 +174,17 @@ export function jevMiddleware(env) {
       return send(200, {
         auth_required: false,
         authenticated: false,
-        configured: !!env.TYPESAFE_API_KEY,
-        model: "jev-latest",
-        pricing: {
-          input_per_million: Number(env.JEV_INPUT_PRICE ?? 0.042),
-          output_per_million: Number(env.JEV_OUTPUT_PRICE ?? 0),
-        },
+        configured: !!env[config.keyEnv],
+        decision_provider: config.provider,
+        decision_name: config.name,
+        model: config.model,
+        pricing: config.pricing,
       });
     if (path !== "/api/decide" || req.method !== "POST")
       return send(404, { error: "Not found" });
-    if (!env.TYPESAFE_API_KEY)
+    if (!env[config.keyEnv])
       return send(503, {
-        error: "Set TYPESAFE_API_KEY in .env and restart the server.",
+        error: `Set ${config.keyEnv} in .env and restart the server.`,
       });
     if (
       req.headers.origin &&
